@@ -94,7 +94,7 @@ $(ISO_IMAGE): $(boot_dir) $(BUILT_IMG)
 	$(hide) sed -i "s|\(Installation CD\)\(.*\)|\1 $(VER)|; s|CMDLINE|$(BOARD_KERNEL_CMDLINE)|" $</isolinux/isolinux.cfg
 	genisoimage -vJURT -b isolinux/isolinux.bin -c isolinux/boot.cat \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
-		-input-charset utf-8 -V "Android-x86 LiveCD" -o $@ $^
+		-input-charset utf-8 -V "Console OS LiveCD" -o $@ $^
 	$(hide) isohybrid $@ || echo -e "isohybrid not found.\nInstall syslinux 4.0 or higher if you want to build a usb bootable iso."
 	@echo -e "\n\n$@ is built successfully.\n\n"
 
@@ -108,7 +108,7 @@ $(EFI_IMAGE): $(wildcard $(LOCAL_PATH)/boot/efi/*/*) $(BUILT_IMG) $(ESP_LAYOUT) 
 		size=$$(($$size+$$s)); \
         done; \
 	size=$$(($$(($$(($$(($$(($$size + $$(($$size / 100)))) - 1)) / 32)) + 1)) * 32)); \
-	rm -f $@.fat; mkdosfs -n Android-x86 -C $@.fat $$size
+	rm -f $@.fat; mkdosfs -n Console-OS -C $@.fat $$size
 	$(hide) mcopy -Qsi $@.fat $(<D)/../../../install/grub2/efi $(BUILT_IMG) ::
 	$(hide) mcopy -Qoi $@.fat $(@D)/grub.cfg ::efi/boot
 	$(hide) cat /dev/null > $@; $(edit_mbr) -l $(ESP_LAYOUT) -i $@ esp=$@.fat
