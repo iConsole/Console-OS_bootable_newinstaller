@@ -1,5 +1,7 @@
 #!/bin/busybox sh
 #
+# Copyright 2016 Console, Inc. Use under GPLv2.
+#
 # By Chih-Wei Huang <cwhuang@linux.org.tw>
 # and Thorsten Glaser <tg@mirbsd.org>
 #
@@ -125,7 +127,7 @@ debug_shell()
 	fi
 }
 
-echo -n Detecting Android-x86...
+echo -n Detecting Console OS...
 
 [ -z "$SRC" -a -n "$BOOT_IMAGE" ] && SRC=`dirname $BOOT_IMAGE`
 
