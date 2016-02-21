@@ -1,221 +1,122 @@
-#!/bin/busybox sh
+# Copyright 2009-2014, The Android-x86 Open Source Project
 #
-# Copyright 2016 Console, Inc. Use under GPLv2.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# By Chih-Wei Huang <cwhuang@linux.org.tw>
-# and Thorsten Glaser <tg@mirbsd.org>
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# Last updated 2015/10/23
-#
-# License: GNU Public License
-# We explicitely grant the right to use the scripts
-# with Android-x86 project.
-#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-PATH=/sbin:/bin:/system/bin:/system/xbin; export PATH
+ifneq ($(filter x86%,$(TARGET_ARCH)),)
+LOCAL_PATH := $(call my-dir)
+include $(CLEAR_VARS)
 
-# configure debugging output
-if [ -n "$DEBUG" ]; then
-	LOG=/tmp/log
-	set -x
-else
-	LOG=/dev/null
-	test -e "$LOG" || busybox mknod $LOG c 1 3
-fi
-exec 2>> $LOG
+LOCAL_MODULE := edit_mbr
+LOCAL_SRC_FILES := editdisklbl/editdisklbl.c
+LOCAL_CFLAGS := -O2 -g -W -Wall -Werror# -D_LARGEFILE64_SOURCE
+LOCAL_STATIC_LIBRARIES := libdiskconfig_host libcutils liblog
+edit_mbr := $(HOST_OUT_EXECUTABLES)/$(LOCAL_MODULE)
+include $(BUILD_HOST_EXECUTABLE)
 
-# early boot
-if test x"$HAS_CTTY" != x"Yes"; then
-	# initialise /proc and /sys
-	busybox mount -t proc proc /proc
-	busybox mount -t sysfs sys /sys
-	# let busybox install all applets as symlinks
-	busybox --install -s
-	# spawn shells on tty 2 and 3 if debug or installer
-	if test -n "$DEBUG" || test -n "$INSTALL"; then
-		# ensure they can open a controlling tty
-		mknod /dev/tty c 5 0
-		# create device nodes then spawn on them
-		mknod /dev/tty2 c 4 2 && openvt
-		mknod /dev/tty3 c 4 3 && openvt
-	fi
-	if test -z "$DEBUG" || test -n "$INSTALL"; then
-		echo 0 0 0 0 > /proc/sys/kernel/printk
-	fi
-	# initialise /dev (first time)
-	mkdir -p /dev/block
-	echo /sbin/mdev > /proc/sys/kernel/hotplug
-	mdev -s
-	# re-run this script with a controlling tty
-	exec env HAS_CTTY=Yes setsid cttyhack /bin/sh "$0" "$@"
-fi
+VER ?= $(shell date +"%F")
 
-# now running under a controlling tty; debug output from stderr into log file
-# boot up Android
+# use squashfs for iso, unless explictly disabled
+ifneq ($(USE_SQUASHFS),0)
+MKSQUASHFS = $(shell which mksquashfs)
 
-error()
-{
-	echo $*
-	return 1
-}
+define build-squashfs-target
+	$(if $(shell $(MKSQUASHFS) -version | grep "version [0-3].[0-9]"),\
+		$(error Your mksquashfs is too old to work with kernel 2.6.29. Please upgrade to squashfs-tools 4.0))
+	$(hide) $(MKSQUASHFS) $(1) $(2) -noappend
+endef
+endif
 
-try_mount()
-{
-	RW=$1; shift
-	if [ "${ROOT#*:/}" != "$ROOT" ]; then
-		# for NFS roots, use nolock to avoid dependency to portmapper
-		RW="nolock,$RW"
-	fi
-	# FIXME: any way to mount ntfs gracefully?
-	mount -o $RW $@ || mount.ntfs-3g -o rw,force $@
-}
+define check-density
+	eval d=$$(grep ^ro.sf.lcd_density $(INSTALLED_DEFAULT_PROP_TARGET) $(INSTALLED_BUILD_PROP_TARGET) | sed 's|\(.*\)=\(.*\)|\2|'); \
+	[ -z "$$d" ] || ( awk -v d=$$d ' BEGIN { \
+		if (d <= 180) { \
+			label="liveh"; dpi="HDPI"; \
+		} else { \
+			label="livem"; dpi="MDPI"; \
+		} \
+	} { \
+		if (match($$2, label)) \
+			s=5; \
+		else if (match($$0, dpi)) \
+			s=4; \
+		else \
+			s=0; \
+		for (i = 0; i < s; ++i) \
+			getline; \
+		gsub(" DPI=[0-9]*",""); print $$0; \
+	}' $(1) > $(1)_ && mv $(1)_ $(1) )
+endef
 
-check_root()
-{
-	if [ "`dirname $1`" = "/dev" ]; then
-		[ -e $1 ] || return 1
-		blk=`basename $1`
-		[ ! -e /dev/block/$blk ] && ln $1 /dev/block
-		dev=/dev/block/$blk
-	else
-		dev=$1
-	fi
-	try_mount ro $dev /mnt || return 1
-	if [ -n "$iso" -a -e /mnt/$iso ]; then
-		mount --move /mnt /iso
-		mkdir /mnt/iso
-		mount -o loop /iso/$iso /mnt/iso
-		SRC=iso
-	elif [ ! -e /mnt/$SRC/ramdisk.img ]; then
-		return 1
-	fi
-	zcat /mnt/$SRC/ramdisk.img | cpio -id > /dev/null
-	if [ -e /mnt/$SRC/system.sfs ]; then
-		mount -o loop /mnt/$SRC/system.sfs /sfs
-		mount -o loop /sfs/system.img system
-	elif [ -e /mnt/$SRC/system.img ]; then
-		remount_rw
-		mount -o loop /mnt/$SRC/system.img system
-	elif [ -d /mnt/$SRC/system ]; then
-		remount_rw
-		mount --bind /mnt/$SRC/system system
-	else
-		rm -rf *
-		return 1
-	fi
-	mkdir mnt
-	echo " found at $1"
-	rm /sbin/mke2fs
-	hash -r
-}
+initrd_dir := $(LOCAL_PATH)/initrd
+initrd_bin := \
+	$(initrd_dir)/init \
+	$(wildcard $(initrd_dir)/*/*)
 
-remount_rw()
-{
-	# "foo" as mount source is given to workaround a Busybox bug with NFS
-	# - as it's ignored anyways it shouldn't harm for other filesystems.
-	mount -o remount,rw foo /mnt
-}
+systemimg  := $(PRODUCT_OUT)/system.$(if $(MKSQUASHFS),sfs,img)
 
-debug_shell()
-{
-	if [ -x system/bin/sh ]; then
-		echo Running MirBSD Korn Shell...
-		USER="($1)" system/bin/sh -l 2>&1
-	else
-		echo Running busybox ash...
-		sh 2>&1
-	fi
-}
+INITRD_RAMDISK := $(PRODUCT_OUT)/initrd.img
+$(INITRD_RAMDISK): $(initrd_bin) $(systemimg) $(TARGET_INITRD_SCRIPTS) | $(ACP) $(MKBOOTFS)
+	rm -rf $(TARGET_INSTALLER_OUT)
+	$(ACP) -pr $(initrd_dir) $(TARGET_INSTALLER_OUT)
+	$(if $(TARGET_INITRD_SCRIPTS),$(ACP) -p $(TARGET_INITRD_SCRIPTS) $(TARGET_INSTALLER_OUT)/scripts)
+	ln -s /bin/ld-linux.so.2 $(TARGET_INSTALLER_OUT)/lib
+	mkdir -p $(addprefix $(TARGET_INSTALLER_OUT)/,android iso mnt proc sys tmp sfs hd)
+	echo "VER=$(VER)" > $(TARGET_INSTALLER_OUT)/scripts/00-ver
+	$(MKBOOTFS) $(TARGET_INSTALLER_OUT) | gzip -9 > $@
 
-echo -n Detecting Console OS...
+INSTALL_RAMDISK := $(PRODUCT_OUT)/install.img
+$(INSTALL_RAMDISK): $(wildcard $(LOCAL_PATH)/install/*/* $(LOCAL_PATH)/install/*/*/*/*) | $(MKBOOTFS)
+	$(if $(TARGET_INSTALL_SCRIPTS),$(ACP) -p $(TARGET_INSTALL_SCRIPTS) $(TARGET_INSTALLER_OUT)/scripts)
+	$(MKBOOTFS) $(dir $(dir $(<D))) | gzip -9 > $@
 
-[ -z "$SRC" -a -n "$BOOT_IMAGE" ] && SRC=`dirname $BOOT_IMAGE`
+boot_dir := $(PRODUCT_OUT)/boot
+$(boot_dir): $(wildcard $(LOCAL_PATH)/boot/isolinux/*) $(systemimg) $(GENERIC_X86_CONFIG_MK) | $(ACP)
+	$(hide) rm -rf $@
+	$(ACP) -pr $(dir $(<D)) $@
 
-for c in `cat /proc/cmdline`; do
-	case $c in
-		iso-scan/filename=*)
-			eval `echo $c | cut -b1-3,18-`
-			;;
-		*)
-			;;
-	esac
-done
+BUILT_IMG := $(addprefix $(PRODUCT_OUT)/,ramdisk.img initrd.img install.img) $(systemimg)
+BUILT_IMG += $(if $(TARGET_PREBUILT_KERNEL),$(TARGET_PREBUILT_KERNEL),$(PRODUCT_OUT)/kernel)
 
-mount -t tmpfs tmpfs /android
-cd /android
-while :; do
-	for device in ${ROOT:-/dev/[hmsv][dmr][0-9a-z]*}; do
-		check_root $device && break 2
-		mountpoint -q /mnt && umount /mnt
-	done
-	sleep 1
-	echo -n .
-done
+ISO_IMAGE := $(PRODUCT_OUT)/$(TARGET_PRODUCT).iso
+$(ISO_IMAGE): $(boot_dir) $(BUILT_IMG)
+	@echo ----- Making iso image ------
+	$(hide) $(call check-density,$</isolinux/isolinux.cfg)
+	$(hide) sed -i "s|\(Installation CD\)\(.*\)|\1 $(VER)|; s|CMDLINE|$(BOARD_KERNEL_CMDLINE)|" $</isolinux/isolinux.cfg
+	genisoimage -vJURT -b isolinux/isolinux.bin -c isolinux/boot.cat \
+		-no-emul-boot -boot-load-size 4 -boot-info-table \
+		-input-charset utf-8 -V "Console OS LiveCD" -o $@ $^
+	$(hide) isohybrid $@ || echo -e "isohybrid not found.\nInstall syslinux 4.0 or higher if you want to build a usb bootable iso."
+	@echo -e "\n\n$@ is built successfully.\n\n"
 
-ln -s mnt/$SRC /src
-ln -s android/system /
-ln -s ../system/lib/firmware ../system/lib/modules /lib
+# Note: requires dosfstools
+EFI_IMAGE := $(PRODUCT_OUT)/$(TARGET_PRODUCT).img
+ESP_LAYOUT := $(LOCAL_PATH)/editdisklbl/esp_layout.conf
+$(EFI_IMAGE): $(wildcard $(LOCAL_PATH)/boot/efi/*/*) $(BUILT_IMG) $(ESP_LAYOUT) | $(edit_mbr)
+	$(hide) sed "s|VER|$(VER)|; s|CMDLINE|$(BOARD_KERNEL_CMDLINE)|" $(<D)/grub.cfg > $(@D)/grub.cfg
+	$(hide) size=0; \
+	for s in `du -sk $^ | awk '{print $$1}'`; do \
+		size=$$(($$size+$$s)); \
+        done; \
+	size=$$(($$(($$(($$(($$(($$size + $$(($$size / 100)))) - 1)) / 32)) + 1)) * 32)); \
+	rm -f $@.fat; mkdosfs -n Console-OS -C $@.fat $$size
+	$(hide) mcopy -Qsi $@.fat $(<D)/../../../install/grub2/efi $(BUILT_IMG) ::
+	$(hide) mcopy -Qoi $@.fat $(@D)/grub.cfg ::efi/boot
+	$(hide) cat /dev/null > $@; $(edit_mbr) -l $(ESP_LAYOUT) -i $@ esp=$@.fat
+	$(hide) rm -f $@.fat
 
-if [ -n "$INSTALL" ]; then
-	zcat /src/install.img | ( cd /; cpio -iud > /dev/null )
-fi
+.PHONY: iso_img usb_img efi_img
+iso_img: $(ISO_IMAGE)
+usb_img: $(ISO_IMAGE)
+efi_img: $(EFI_IMAGE)
 
-if [ -x system/bin/ln -a \( -n "$DEBUG" -o -n "$BUSYBOX" \) ]; then
-	mv /bin /lib .
-	sed -i 's|\( PATH.*\)|\1:/bin|' init.environ.rc
-	rm /sbin/modprobe
-	busybox mv /sbin/* sbin
-	rmdir /sbin
-	ln -s android/bin android/lib android/sbin /
-	hash -r
-fi
-
-# ensure keyboard driver is loaded
-[ -n "$INSTALL" -o -n "$DEBUG" ] && busybox modprobe atkbd
-
-if [ 0$DEBUG -gt 0 ]; then
-	echo -e "\nType 'exit' to continue booting...\n"
-	debug_shell debug-found
-fi
-
-# load scripts
-for s in `ls /scripts/* /src/scripts/*`; do
-	test -e "$s" && source $s
-done
-
-# A target should provide its detect_hardware function.
-# On success, return 0 with the following values set.
-# return 1 if it wants to use auto_detect
-[ "$AUTO" != "1" ] && detect_hardware && FOUND=1
-
-[ -n "$INSTALL" ] && do_install
-
-load_modules
-mount_data
-mount_sdcard
-setup_tslib
-setup_dpi
-post_detect
-
-if [ 0$DEBUG -gt 1 ]; then
-	echo -e "\nUse Alt-F1/F2/F3 to switch between virtual consoles"
-	echo -e "Type 'exit' to enter Android...\n"
-
-	debug_shell debug-late
-fi
-
-[ -n "$DEBUG" ] && SWITCH=${SWITCH:-chroot}
-
-# We must disable mdev before switching to Android
-# since it conflicts with Android's init
-echo > /proc/sys/kernel/hotplug
-
-exec ${SWITCH:-switch_root} /android /init
-
-# avoid kernel panic
-while :; do
-	echo
-	echo '	Android-x86 console shell. Use only in emergencies.'
-	echo
-	debug_shell fatal-err
-done
+endif
